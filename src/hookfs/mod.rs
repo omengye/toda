@@ -16,7 +16,7 @@ use async_trait::async_trait;
 use derive_more::{Deref, DerefMut, From};
 pub use errors::{HookFsError as Error, Result};
 use fuser::*;
-use libc::{c_void, lgetxattr, llistxattr, lremovexattr, lsetxattr};
+use libc::{c_char, c_void, lgetxattr, llistxattr, lremovexattr, lsetxattr};
 use nix::dir;
 use nix::errno::Errno;
 use nix::fcntl::{open, readlink, renameat, OFlag};
@@ -705,7 +705,7 @@ impl AsyncFileSystemImpl for HookFs {
                 LinkatFlags::NoSymlinkFollow,
             )
         })
-        .await??;
+            .await??;
 
         let stat = self.get_file_attr(&new_path).await?;
         inode_map.insert_path(stat.ino, new_path.clone());
@@ -856,7 +856,7 @@ impl AsyncFileSystemImpl for HookFs {
             trace!("opening directory {}", path_clone.display());
             dir::Dir::open(&path_clone, filtered_flags, stat::Mode::S_IRWXU)
         })
-        .await??;
+            .await??;
         trace!("directory {} opened", path.display());
         let fh = self.opened_dirs.write().await.insert(Dir::new(dir, &path)) as u64;
         trace!("return with fh: {}, flags: {}", fh, flags);
@@ -928,7 +928,7 @@ impl AsyncFileSystemImpl for HookFs {
 
             Ok(())
         })
-        .await??;
+            .await??;
         Ok(())
     }
 
@@ -1027,7 +1027,7 @@ impl AsyncFileSystemImpl for HookFs {
             let buf_ptr = buf_clone.as_slice() as *const [u8] as *mut [u8] as *mut libc::c_char;
             unsafe { llistxattr(path_ptr, buf_ptr, size as usize) }
         })
-        .await?;
+            .await?;
 
         if ret == -1 {
             return Err(Error::last());
@@ -1058,7 +1058,7 @@ impl AsyncFileSystemImpl for HookFs {
             let name_ptr = &name.as_bytes_with_nul()[0] as *const u8 as *const libc::c_char;
             unsafe { lremovexattr(path_ptr, name_ptr) }
         })
-        .await?;
+            .await?;
 
         if ret == -1 {
             return Err(Error::last());
@@ -1175,7 +1175,7 @@ async fn async_setxattr(path: CString, name: CString, data: Vec<u8>, flags: i32)
             Ok(())
         }
     })
-    .await?
+        .await?
 }
 
 async fn async_getxattr(path: CString, name: CString, size: usize) -> Result<Vec<u8>> {
@@ -1195,7 +1195,7 @@ async fn async_getxattr(path: CString, name: CString, size: usize) -> Result<Vec
             Ok(buf)
         }
     })
-    .await?
+        .await?
 }
 
 async fn async_read(fd: RawFd, count: usize, offset: i64) -> Result<Vec<u8>> {
@@ -1210,7 +1210,7 @@ async fn async_read(fd: RawFd, count: usize, offset: i64) -> Result<Vec<u8>> {
             Ok(buf)
         }
     })
-    .await?
+        .await?
 }
 
 async fn async_write(fd: RawFd, data: Vec<u8>, offset: i64) -> Result<isize> {
@@ -1222,7 +1222,7 @@ async fn async_write(fd: RawFd, data: Vec<u8>, offset: i64) -> Result<isize> {
             Ok(ret)
         }
     })
-    .await?
+        .await?
 }
 
 async fn async_stat(path: &Path) -> Result<stat::FileStat> {
@@ -1242,7 +1242,7 @@ async fn async_lchown(path: &Path, uid: Option<u32>, gid: Option<u32>) -> Result
             FchownatFlags::NoFollowSymlink,
         )
     })
-    .await??;
+        .await??;
     Ok(())
 }
 
@@ -1256,7 +1256,7 @@ async fn async_fchmodat(path: &Path, mode: u32) -> Result<()> {
             stat::FchmodatFlags::FollowSymlink,
         )
     })
-    .await??;
+        .await??;
     Ok(())
 }
 
@@ -1268,7 +1268,7 @@ async fn async_truncate(path: &Path, len: i64) -> Result<()> {
 
 async fn async_utimensat(path: CString, times: [libc::timespec; 2]) -> Result<()> {
     spawn_blocking(move || unsafe {
-        let path_ptr = &path.as_bytes_with_nul()[0] as *const u8 as *mut u8;
+        let path_ptr = &path.as_bytes_with_nul()[0] as *const c_char;
         let ret = libc::utimensat(
             0,
             path_ptr,
@@ -1277,12 +1277,13 @@ async fn async_utimensat(path: CString, times: [libc::timespec; 2]) -> Result<()
         );
 
         if ret != 0 {
+            debug!("async_utimensat error");
             Err(Error::last())
         } else {
             Ok(())
         }
     })
-    .await??;
+        .await??;
     Ok(())
 }
 
@@ -1293,16 +1294,17 @@ async fn async_readlink(path: &Path) -> Result<OsString> {
 
 async fn async_mknod(path: CString, mode: u32, rdev: u64) -> Result<()> {
     spawn_blocking(move || {
-        let path_ptr = &path.as_bytes_with_nul()[0] as *const u8 as *mut u8;
+        let path_ptr = &path.as_bytes_with_nul()[0] as *const c_char;
         let ret = unsafe { libc::mknod(path_ptr, mode, rdev) };
 
         if ret != 0 {
+            debug!("async_mknod error");
             Err(Error::last())
         } else {
             Ok(())
         }
     })
-    .await?
+        .await?
 }
 
 async fn async_mkdir(path: &Path, mode: stat::Mode) -> Result<()> {
@@ -1319,16 +1321,17 @@ async fn async_unlink(path: &Path) -> Result<()> {
 
 async fn async_rmdir(path: CString) -> Result<()> {
     spawn_blocking(move || {
-        let path_ptr = &path.as_bytes_with_nul()[0] as *const u8 as *mut u8;
+        let path_ptr = &path.as_bytes_with_nul()[0] as *const c_char;
         let ret = unsafe { libc::rmdir(path_ptr) };
 
         if ret != 0 {
+            debug!("async_rmdir error");
             Err(Error::last())
         } else {
             Ok(())
         }
     })
-    .await?
+        .await?
 }
 
 async fn async_open(path: &Path, filtered_flags: OFlag, mode: stat::Mode) -> Result<RawFd> {
