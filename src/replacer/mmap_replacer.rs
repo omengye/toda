@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
 use itertools::Itertools;
 use nix::sys::mman::{MapFlags, ProtFlags};
-use procfs::process::MMapPath;
+use procfs::process::{MMapPath,MMPermissions};
 use tracing::{error, info, trace};
 
 use super::utils::all_processes;
@@ -188,6 +188,7 @@ impl ProcessAccessor {
                 ; mov rdi, QWORD [r14+r15] // addr
                 ; mov rsi, QWORD [r14+r15+8] // length
                 ; mov rdx, 0x0
+                ; push rdi
                 ; syscall
                 // open
                 ; mov rax, 0x2
@@ -200,6 +201,7 @@ impl ProcessAccessor {
                 ; mov rsi, libc::O_RDWR
                 ; mov rdx, 0x0
                 ; syscall
+                ; pop rdi // addr
                 ; push rax
                 ; mov r8, rax // fd
                 // mmap
@@ -238,27 +240,27 @@ impl ProcessAccessor {
     }
 }
 
-fn get_prot_and_flags_from_perms<S: AsRef<str>>(perms: S) -> (u64, u64) {
-    let bytes = perms.as_ref().as_bytes();
+fn get_prot_and_flags_from_perms(perms: MMPermissions) -> (u64, u64) {
     let mut prot = ProtFlags::empty();
-    let mut flags = MapFlags::MAP_PRIVATE;
-
-    if bytes[0] == b'r' {
+    if perms.contains(MMPermissions::READ) {
         prot |= ProtFlags::PROT_READ
     }
-    if bytes[1] == b'w' {
+    if perms.contains(MMPermissions::WRITE) {
         prot |= ProtFlags::PROT_WRITE
     }
-    if bytes[2] == b'x' {
+    if perms.contains(MMPermissions::EXECUTE) {
         prot |= ProtFlags::PROT_EXEC
     }
-    if bytes[3] == b's' {
-        flags = MapFlags::MAP_SHARED;
-    }
+
+    let flags = if perms.contains(MMPermissions::SHARED) {
+        MapFlags::MAP_SHARED
+    } else {
+        MapFlags::MAP_PRIVATE
+    };
 
     trace!(
-        "perms: {}, prot: {:?}, flags: {:?}",
-        perms.as_ref(),
+        "perms: {:?}, prot: {:?}, flags: {:?}",
+        perms,
         prot,
         flags
     );

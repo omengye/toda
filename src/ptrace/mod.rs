@@ -22,17 +22,12 @@ use retry::OperationResult;
 use tracing::{error, info, instrument, trace, warn};
 use Error::Internal;
 
+use libc::user_regs_struct;
 
-
-#[repr(i32)]
 /// Defines a specific register set, as used in `PTRACE_GETREGSET` and `PTRACE_SETREGSET`.
 #[non_exhaustive]
 pub enum RegisterSetValue {
-    NT_PRSTATUS,
-    NT_PRFPREG,
-    NT_PRPSINFO,
-    NT_TASKSTRUCT,
-    NT_AUXV,
+    NtPrstatus,
 }
 pub unsafe trait RegisterSet {
     /// Corresponding type of registers in the kernel.
@@ -42,6 +37,28 @@ pub unsafe trait RegisterSet {
     type Regs;
 }
 
+pub mod regset {
+    use super::*;
+
+    #[derive(Debug, Clone, Copy)]
+    /// General-purpose registers.
+    pub enum NtPrstatus {}
+
+    unsafe impl RegisterSet for NtPrstatus {
+        const VALUE: RegisterSetValue = RegisterSetValue::NtPrstatus;
+        type Regs = user_regs_struct;
+    }
+
+    #[derive(Debug, Clone, Copy)]
+    /// Floating-point registers.
+    pub enum NtPrfpreg {}
+
+    unsafe impl RegisterSet for NtPrfpreg {
+        const VALUE: RegisterSetValue = RegisterSetValue::NtPrstatus;
+        type Regs = libc::user_fpsimd_struct;
+    }
+}
+
 unsafe fn ptrace_other(
     request: ptrace::Request,
     pid: Pid,
@@ -49,37 +66,53 @@ unsafe fn ptrace_other(
     data: *mut c_void,
 ) -> nix::Result<c_long> {
     unsafe {
-        Errno::result(libc::ptrace(request as ptrace::RequestType, libc::pid_t::from(pid), addr, data)).map(|_| 0)
+        Errno::result(libc::ptrace(
+            request as ptrace::RequestType,
+            libc::pid_t::from(pid),
+            addr,
+            data,
+        ))
+            .map(|_| 0)
     }
 }
-pub fn getregset(pid: Pid) -> nix::Result<libc::user_regs_struct> {
+
+
+pub fn getregs(pid: Pid) -> Result<user_regs_struct> {
+    getregset::<regset::NtPrstatus>(pid)
+}
+
+pub fn getregset<S: RegisterSet>(pid: Pid) -> Result<S::Regs> {
     let request = ptrace::Request::PTRACE_GETREGSET;
-    let mut data = mem::MaybeUninit::<libc::user_regs_struct>::uninit();
+    let mut data = mem::MaybeUninit::<S::Regs>::uninit();
     let mut iov = libc::iovec {
         iov_base: data.as_mut_ptr().cast(),
-        iov_len: mem::size_of::<libc::user_regs_struct>(),
+        iov_len: mem::size_of::<S::Regs>(),
     };
     unsafe {
         ptrace_other(
             request,
             pid,
-            RegisterSetValue::NT_PRSTATUS as i32 as ptrace::AddressType,
+            S::VALUE as i32 as ptrace::AddressType,
             (&mut iov as *mut libc::iovec).cast(),
         )?;
     };
     Ok(unsafe { data.assume_init() })
 }
 
-pub fn setregset(pid: Pid, mut regs: libc::user_regs_struct) -> nix::Result<()> {
+pub fn setregs(pid: Pid, regs: user_regs_struct) -> Result<()> {
+    setregset::<regset::NtPrstatus>(pid, regs)
+}
+
+pub fn setregset<S: RegisterSet>(pid: Pid, mut regs: S::Regs) -> Result<()> {
     let mut iov = libc::iovec {
-        iov_base: (&mut regs as *mut libc::user_regs_struct).cast(),
-        iov_len: mem::size_of::<libc::user_regs_struct>(),
+        iov_base: (&mut regs as *mut S::Regs).cast(),
+        iov_len: mem::size_of::<S::Regs>(),
     };
     unsafe {
         ptrace_other(
             ptrace::Request::PTRACE_SETREGSET,
             pid,
-            RegisterSetValue::NT_PRSTATUS as i32 as ptrace::AddressType,
+            S::VALUE as i32 as ptrace::AddressType,
             (&mut iov as *mut libc::iovec).cast(),
         )?;
     }
@@ -115,7 +148,7 @@ fn attach_task(task: &Task) -> Result<()> {
     match ptrace::attach(pid) {
         Err(Sys(errno))
             if errno == Errno::ESRCH
-                || (errno == Errno::EPERM && thread_is_gone(process.stat.state)) =>
+                || (errno == Errno::EPERM && thread_is_gone(process.stat()?.state)) =>
         {
             info!("task {} doesn't exist, maybe has stopped", task.tid)
         }
@@ -261,7 +294,7 @@ impl Clone for TracedProcess {
 impl TracedProcess {
     #[instrument]
     fn protect(&self) -> Result<ThreadGuard> {
-        let regs = getregset(Pid::from_raw(self.pid))?;
+        let regs = getregs(Pid::from_raw(self.pid))?;
 
         let rip = regs.pc;
         trace!("protecting regs: {:?}", regs);
@@ -293,29 +326,27 @@ impl TracedProcess {
         self.with_protect(|thread| -> Result<u64> {
             let pid = Pid::from_raw(thread.pid);
 
-            let mut regs = getregset(pid)?;
-            let cur_ins_ptr = regs.pc;
+            let mut regs = getregs(pid)?;
+            let cur_ins_ptr = regs.pc; // 使用 pc 寄存器代替 rip
 
-            regs.regs[8] = id;
+            regs.regs[0] = id; // 使用 x0 寄存器传递系统调用号
             for (index, arg) in args.iter().enumerate() {
-                match index {
-                    0 => regs.regs[0] = *arg,
-                    1 => regs.regs[1] = *arg,
-                    2 => regs.regs[2] = *arg,
-                    3 => regs.regs[3] = *arg,
-                    4 => regs.regs[4] = *arg,
-                    5 => regs.regs[5] = *arg,
-                    _ => return Err(anyhow!("too many arguments for a syscall")),
+                // arm64 平台下，使用 x0-x7 寄存器传递参数
+                if index < 8 {
+                    regs.regs[index] = *arg;
+                } else {
+                    return Err(anyhow!("too many arguments for a syscall"));
                 }
             }
             trace!("setting regs for pid: {:?}, regs: {:?}", pid, regs);
-            setregset(pid, regs)?;
+            setregs(pid, regs)?;
 
             unsafe {
                 ptrace::write(
                     pid,
                     cur_ins_ptr as *mut libc::c_void,
-                    0xd4000001 as *mut libc::c_void,
+                    // 0xd4200001 为 svc #0 指令的机器码
+                    0xd4200001u32.to_le_bytes().as_ptr() as *mut libc::c_void,
                 )?
             };
             ptrace::step(pid, None)?;
@@ -329,7 +360,7 @@ impl TracedProcess {
                 }
             }
 
-            let regs = getregset(pid)?;
+            let regs = getregs(pid)?;
 
             trace!("returned: {:?}", regs.regs[0]);
 
@@ -397,7 +428,7 @@ impl TracedProcess {
     pub fn run_codes<F: Fn(u64) -> Result<(u64, Vec<u8>)>>(&self, codes: F) -> Result<()> {
         let pid = Pid::from_raw(self.pid);
 
-        let regs = getregset(pid)?;
+        let regs = getregs(pid)?;
         let (_, ins) = codes(regs.pc)?; // generate codes to get length
 
         self.with_mmap(ins.len() as u64 + 16, |_, addr| {
@@ -408,12 +439,12 @@ impl TracedProcess {
                 trace!("write instructions to addr: {:X}-{:X}", addr, end_addr);
                 self.write_mem(addr, &ins)?;
 
-                let mut regs = getregset(pid)?;
+                let mut regs = getregs(pid)?;
                 trace!("modify rip to addr: {:X}", addr + offset);
                 regs.pc = addr + offset;
-                setregset(pid, regs)?;
+                setregs(pid, regs)?;
 
-                let regs = getregset(pid)?;
+                let regs = getregs(pid)?;
                 info!("current registers: {:?}", regs);
 
                 loop {
@@ -425,7 +456,7 @@ impl TracedProcess {
                     info!("wait status: {:?}", status);
 
                     use nix::sys::signal::SIGTRAP;
-                    let regs = getregset(pid)?;
+                    let regs = getregs(pid)?;
 
                     info!("current registers: {:?}", regs);
                     match status {
@@ -472,6 +503,6 @@ impl Drop for ThreadGuard {
             )
             .unwrap();
         }
-        setregset(pid, self.regs).unwrap();
+        setregs(pid, self.regs).unwrap();
     }
 }
