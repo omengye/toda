@@ -12,12 +12,13 @@
 // limitations under the License.
 
 //#![feature(box_syntax)]
-#![feature(async_closure)]
-#![feature(vec_into_raw_parts)]
+//#![feature(async_closure)]
+//#![feature(vec_into_raw_parts)]
 //#![feature(atomic_mut_ptr)]
-#![feature(drain_filter)]
+//#![feature(drain_filter)]
 #![allow(clippy::or_fun_call)]
 #![allow(clippy::too_many_arguments)]
+#![feature(const_trait_impl)]
 
 extern crate derive_more;
 
@@ -37,6 +38,7 @@ use std::os::unix::io::RawFd;
 use std::path::PathBuf;
 use std::sync::{mpsc, Mutex};
 use std::{io, thread};
+use std::os::fd::{AsRawFd, BorrowedFd};
 
 use anyhow::Result;
 use injector::InjectorConfig;
@@ -143,7 +145,7 @@ const SIGNAL_MSG: [u8; 6] = *b"SIGNAL";
 
 extern "C" fn signal_handler(_: libc::c_int) {
     unsafe {
-        write(SIGNAL_PIPE_WRITER, &SIGNAL_MSG).unwrap();
+        write(unsafe { BorrowedFd::borrow_raw(SIGNAL_PIPE_WRITER) }, &SIGNAL_MSG).unwrap();
     }
 }
 
@@ -156,7 +158,7 @@ fn wait_for_signal(chan: RawFd) -> Result<()> {
 fn main() -> Result<()> {
     let (reader, writer) = pipe()?;
     unsafe {
-        SIGNAL_PIPE_WRITER = writer;
+        SIGNAL_PIPE_WRITER = writer.as_raw_fd();
     }
 
     unsafe { signal(Signal::SIGINT, SigHandler::Handler(signal_handler))? };
@@ -196,7 +198,7 @@ fn main() -> Result<()> {
         });
     }
     info!("waiting for signal to exit");
-    wait_for_signal(reader)?;
+    wait_for_signal(reader.as_raw_fd())?;
     info!("start to recover and exit");
     if let Ok(v) = mount_injector {
         resume(option, v)?;

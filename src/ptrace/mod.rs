@@ -1,123 +1,24 @@
 use std::cell::RefCell;
 use std::collections::{HashMap, HashSet};
 use std::ffi::CString;
+use std::io::IoSlice;
 use std::os::unix::ffi::OsStrExt;
 use std::path::Path;
-use std::{mem};
-use libc::{self, c_long, c_void};
+use libc::{self, c_char};
 
 use anyhow::{anyhow, Result};
 use nix::errno::Errno;
 use nix::sys::mman::{MapFlags, ProtFlags};
 use nix::sys::signal::Signal;
-use nix::sys::uio::{process_vm_writev, IoVec, RemoteIoVec};
+use nix::sys::uio::{process_vm_writev, RemoteIoVec};
 use nix::sys::{ptrace, wait};
 use nix::unistd::Pid;
-use nix::Error::Sys;
 use procfs::process::Task;
 use procfs::ProcError;
 use retry::delay::Fixed;
 use retry::Error::{self, Operation};
 use retry::OperationResult;
-use tracing::{error, info, instrument, trace, warn};
-use Error::Internal;
-
-use libc::user_regs_struct;
-
-/// Defines a specific register set, as used in `PTRACE_GETREGSET` and `PTRACE_SETREGSET`.
-#[non_exhaustive]
-pub enum RegisterSetValue {
-    NtPrstatus,
-}
-pub unsafe trait RegisterSet {
-    /// Corresponding type of registers in the kernel.
-    const VALUE: RegisterSetValue;
-
-    /// Struct representing the register space.
-    type Regs;
-}
-
-pub mod regset {
-    use super::*;
-
-    #[derive(Debug, Clone, Copy)]
-    /// General-purpose registers.
-    pub enum NtPrstatus {}
-
-    unsafe impl RegisterSet for NtPrstatus {
-        const VALUE: RegisterSetValue = RegisterSetValue::NtPrstatus;
-        type Regs = user_regs_struct;
-    }
-
-    #[derive(Debug, Clone, Copy)]
-    /// Floating-point registers.
-    pub enum NtPrfpreg {}
-
-    unsafe impl RegisterSet for NtPrfpreg {
-        const VALUE: RegisterSetValue = RegisterSetValue::NtPrstatus;
-        type Regs = libc::user_fpsimd_struct;
-    }
-}
-
-unsafe fn ptrace_other(
-    request: ptrace::Request,
-    pid: Pid,
-    addr: ptrace::AddressType,
-    data: *mut c_void,
-) -> nix::Result<c_long> {
-    unsafe {
-        Errno::result(libc::ptrace(
-            request as ptrace::RequestType,
-            libc::pid_t::from(pid),
-            addr,
-            data,
-        ))
-            .map(|_| 0)
-    }
-}
-
-
-pub fn getregs(pid: Pid) -> Result<user_regs_struct> {
-    getregset::<regset::NtPrstatus>(pid)
-}
-
-pub fn getregset<S: RegisterSet>(pid: Pid) -> Result<S::Regs> {
-    let request = ptrace::Request::PTRACE_GETREGSET;
-    let mut data = mem::MaybeUninit::<S::Regs>::uninit();
-    let mut iov = libc::iovec {
-        iov_base: data.as_mut_ptr().cast(),
-        iov_len: mem::size_of::<S::Regs>(),
-    };
-    unsafe {
-        ptrace_other(
-            request,
-            pid,
-            S::VALUE as i32 as ptrace::AddressType,
-            (&mut iov as *mut libc::iovec).cast(),
-        )?;
-    };
-    Ok(unsafe { data.assume_init() })
-}
-
-pub fn setregs(pid: Pid, regs: user_regs_struct) -> Result<()> {
-    setregset::<regset::NtPrstatus>(pid, regs)
-}
-
-pub fn setregset<S: RegisterSet>(pid: Pid, mut regs: S::Regs) -> Result<()> {
-    let mut iov = libc::iovec {
-        iov_base: (&mut regs as *mut S::Regs).cast(),
-        iov_len: mem::size_of::<S::Regs>(),
-    };
-    unsafe {
-        ptrace_other(
-            ptrace::Request::PTRACE_SETREGSET,
-            pid,
-            S::VALUE as i32 as ptrace::AddressType,
-            (&mut iov as *mut libc::iovec).cast(),
-        )?;
-    }
-    Ok(())
-}
+use tracing::{debug, error, info, instrument, trace, warn};
 
 // There should be only one PtraceManager in one thread. But as we don't implement TLS
 // , we cannot use thread-local variables safely.
@@ -146,16 +47,12 @@ fn attach_task(task: &Task) -> Result<()> {
 
     trace!("attach task: {}", task.tid);
     match ptrace::attach(pid) {
-        Err(Sys(errno))
-            if errno == Errno::ESRCH
-                || (errno == Errno::EPERM && thread_is_gone(process.stat()?.state)) =>
-        {
-            info!("task {} doesn't exist, maybe has stopped", task.tid)
-        }
-        Err(err) => {
-            warn!("attach error: {:?}", err);
-            return Err(err.into());
-        }
+        Err(errno)
+        if errno == Errno::ESRCH
+            || (errno == Errno::EPERM && thread_is_gone(process.stat()?.state)) =>
+            {
+                info!("task {} doesn't exist, maybe has stopped", task.tid)
+            }
         _ => {}
     }
     info!("attach task: {} successfully", task.tid);
@@ -163,7 +60,7 @@ fn attach_task(task: &Task) -> Result<()> {
     // TODO: check wait result
     match wait::waitpid(pid, Some(wait::WaitPidFlag::__WALL)) {
         Ok(status) => {
-            info!("wait status: {:?}", status);
+            trace!("wait status: {:?}", status);
         }
         Err(err) => warn!("fail to wait for process({}): {:?}", pid, err),
     };
@@ -241,17 +138,17 @@ impl PtraceManager {
                                 Ok(tasks) => {
                                     for task in tasks.flatten() {
                                         match ptrace::detach(Pid::from_raw(task.tid), None) {
-                                                Ok(()) => {
-                                                    info!("successfully detached task: {}", task.tid);
-                                                }
-                                                Err(Sys(Errno::ESRCH)) => trace!(
+                                            Ok(()) => {
+                                                info!("successfully detached task: {}", task.tid);
+                                            }
+                                            Err(Errno::ESRCH) => trace!(
                                                     "task {} doesn't exist, maybe has stopped or not traced",
                                                     task.tid
                                                 ),
-                                                Err(err) => {
-                                                    warn!("fail to detach: {:?}", err)
-                                                },
-                                            }
+                                            Err(err) => {
+                                                warn!("fail to detach: {:?}", err)
+                                            },
+                                        }
                                         trace!("detach task: {} successfully", task.tid);
                                     }
                                     info!("detach process: {} successfully", pid);
@@ -267,7 +164,7 @@ impl PtraceManager {
                                 total_delay: _,
                                 tries: _,
                             } => return Err(e),
-                            Internal(err) => error!("internal error: {:?}", err),
+                            Error::Internal(err) => error!("internal error: {:?}", err),
                         }
                     };
                 }
@@ -294,7 +191,7 @@ impl Clone for TracedProcess {
 impl TracedProcess {
     #[instrument]
     fn protect(&self) -> Result<ThreadGuard> {
-        let regs = getregs(Pid::from_raw(self.pid))?;
+        let regs = ptrace::getregs(Pid::from_raw(self.pid))?;
 
         let rip = regs.pc;
         trace!("protecting regs: {:?}", regs);
@@ -326,7 +223,7 @@ impl TracedProcess {
         self.with_protect(|thread| -> Result<u64> {
             let pid = Pid::from_raw(thread.pid);
 
-            let mut regs = getregs(pid)?;
+            let mut regs = ptrace::getregs(pid)?;
             let cur_ins_ptr = regs.pc; // 使用 pc 寄存器代替 rip
 
             regs.regs[0] = id; // 使用 x0 寄存器传递系统调用号
@@ -339,28 +236,28 @@ impl TracedProcess {
                 }
             }
             trace!("setting regs for pid: {:?}, regs: {:?}", pid, regs);
-            setregs(pid, regs)?;
+            ptrace::setregs(pid, regs)?;
 
             unsafe {
                 ptrace::write(
                     pid,
                     cur_ins_ptr as *mut libc::c_void,
                     // 0xd4200001 为 svc #0 指令的机器码
-                    0xd4200001u32.to_le_bytes().as_ptr() as *mut libc::c_void,
+                    (0xd4200001u32 as c_char).into(),
                 )?
             };
             ptrace::step(pid, None)?;
 
             loop {
                 let status = wait::waitpid(pid, None)?;
-                info!("wait status: {:?}", status);
+                trace!("wait status: {:?}", status);
                 match status {
                     wait::WaitStatus::Stopped(_, Signal::SIGTRAP) => break,
                     _ => ptrace::step(pid, None)?,
                 }
             }
 
-            let regs = getregs(pid)?;
+            let regs = ptrace::getregs(pid)?;
 
             trace!("returned: {:?}", regs.regs[0]);
 
@@ -414,7 +311,7 @@ impl TracedProcess {
 
         process_vm_writev(
             pid,
-            &[IoVec::from_slice(content)],
+            &[IoSlice::new(content)],
             &[RemoteIoVec {
                 base: addr as usize,
                 len: content.len(),
@@ -428,7 +325,7 @@ impl TracedProcess {
     pub fn run_codes<F: Fn(u64) -> Result<(u64, Vec<u8>)>>(&self, codes: F) -> Result<()> {
         let pid = Pid::from_raw(self.pid);
 
-        let regs = getregs(pid)?;
+        let regs = ptrace::getregs(pid)?;
         let (_, ins) = codes(regs.pc)?; // generate codes to get length
 
         self.with_mmap(ins.len() as u64 + 16, |_, addr| {
@@ -439,12 +336,12 @@ impl TracedProcess {
                 trace!("write instructions to addr: {:X}-{:X}", addr, end_addr);
                 self.write_mem(addr, &ins)?;
 
-                let mut regs = getregs(pid)?;
+                let mut regs = ptrace::getregs(pid)?;
                 trace!("modify rip to addr: {:X}", addr + offset);
                 regs.pc = addr + offset;
-                setregs(pid, regs)?;
+                ptrace::setregs(pid, regs)?;
 
-                let regs = getregs(pid)?;
+                let regs = ptrace::getregs(pid)?;
                 info!("current registers: {:?}", regs);
 
                 loop {
@@ -453,14 +350,13 @@ impl TracedProcess {
 
                     info!("wait for pid: {:?}", pid);
                     let status = wait::waitpid(pid, None)?;
-                    info!("wait status: {:?}", status);
+                    trace!("wait status: {:?}", status);
 
-                    use nix::sys::signal::SIGTRAP;
-                    let regs = getregs(pid)?;
+                    let regs = ptrace::getregs(pid)?;
 
                     info!("current registers: {:?}", regs);
                     match status {
-                        wait::WaitStatus::Stopped(_, SIGTRAP) => {
+                        wait::WaitStatus::Stopped(_, Signal::SIGTRAP) => {
                             break;
                         }
                         _ => info!("continue running replacers"),
@@ -499,10 +395,10 @@ impl Drop for ThreadGuard {
             ptrace::write(
                 pid,
                 self.regs.pc as *mut libc::c_void,
-                self.rip_ins as *mut libc::c_void,
+                self.rip_ins,
             )
-            .unwrap();
+                .unwrap();
         }
-        setregs(pid, self.regs).unwrap();
+        ptrace::setregs(pid, self.regs).unwrap();
     }
 }

@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
 use itertools::Itertools;
 use nix::sys::mman::{MapFlags, ProtFlags};
-use procfs::process::MMapPath;
+use procfs::process::{MMapPath,MMPermissions};
 use tracing::{error, info, trace};
 
 use super::utils::all_processes;
@@ -154,9 +154,10 @@ impl ProcessAccessor {
         let mut new_paths = Vec::new();
         self.new_paths.read_to_end(&mut new_paths)?;
 
-        let (cases_ptr, length, _) = self.cases.clone().into_raw_parts();
-        let size = length * std::mem::size_of::<RawReplaceCase>();
-        let cases = unsafe { std::slice::from_raw_parts(cases_ptr as *mut u8, size) };
+        let cases = &mut *self.cases.clone();
+        let cases_ptr = &mut cases[0] as *mut RawReplaceCase as *mut u8;
+        let size = std::mem::size_of_val(cases);
+        let cases = unsafe { std::slice::from_raw_parts(cases_ptr, size) };
 
         self.process.run_codes(|addr| {
             let mut vec_rt =
@@ -238,27 +239,27 @@ impl ProcessAccessor {
     }
 }
 
-fn get_prot_and_flags_from_perms<S: AsRef<str>>(perms: S) -> (u64, u64) {
-    let bytes = perms.as_ref().as_bytes();
+fn get_prot_and_flags_from_perms(perms: MMPermissions) -> (u64, u64) {
     let mut prot = ProtFlags::empty();
-    let mut flags = MapFlags::MAP_PRIVATE;
-
-    if bytes[0] == b'r' {
+    if perms.contains(MMPermissions::READ) {
         prot |= ProtFlags::PROT_READ
     }
-    if bytes[1] == b'w' {
+    if perms.contains(MMPermissions::WRITE) {
         prot |= ProtFlags::PROT_WRITE
     }
-    if bytes[2] == b'x' {
+    if perms.contains(MMPermissions::EXECUTE) {
         prot |= ProtFlags::PROT_EXEC
     }
-    if bytes[3] == b's' {
-        flags = MapFlags::MAP_SHARED;
-    }
+
+    let flags = if perms.contains(MMPermissions::SHARED) {
+        MapFlags::MAP_SHARED
+    } else {
+        MapFlags::MAP_PRIVATE
+    };
 
     trace!(
-        "perms: {}, prot: {:?}, flags: {:?}",
-        perms.as_ref(),
+        "perms: {:?}, prot: {:?}, flags: {:?}",
+        perms,
         prot,
         flags
     );
@@ -313,7 +314,7 @@ impl MmapReplacer {
                     })
                     .filter(|(_, case)| case.path.starts_with(detect_path))
                     .filter_map(|(process, mut case)| {
-                        let stripped_path = case.path.strip_prefix(&detect_path).ok()?;
+                        let stripped_path = case.path.strip_prefix(detect_path).ok()?;
                         case.path = new_path.join(stripped_path);
                         Some((process, case))
                     })
