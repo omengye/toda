@@ -105,10 +105,9 @@ impl ProcessAccessor {
         let mut new_paths = Vec::new();
         self.new_paths.read_to_end(&mut new_paths)?;
 
-        let cases = &mut *self.cases.clone();
-        let cases_ptr = &mut cases[0] as *mut ReplaceCase as *mut u8;
-        let size = std::mem::size_of_val(cases);
-        let cases = unsafe { std::slice::from_raw_parts(cases_ptr, size) };
+        let (cases_ptr, length, _) = self.cases.clone().into_raw_parts();
+        let size = length * std::mem::size_of::<ReplaceCase>();
+        let cases = unsafe { std::slice::from_raw_parts(cases_ptr as *mut u8, size) };
 
         info!("Aarch64Relocation start");
         self.process.run_codes(|addr| {
@@ -131,54 +130,57 @@ impl ProcessAccessor {
             dynasm!(vec_rt
                 ; .arch aarch64
                 // set x15 to 0
-                ; mov x15, 0
+                ; mov x15, #0
                 ; adr x14, -> cases
 
                 ; b ->end
                 ; ->start:
                 // fcntl
-                ; mov x8, 0x48
+                ; mov x8, #25 // fcntl syscall number
                 ; ldr x0, [x14, x15] // fd
-                ; mov x1, 0x3
-                ; mov x2, 0x0
-                ; svc 0
+                ; mov x1, #3
+                ; mov x2, #0
+                ; svc #0
                 ; mov x1, x0
                 // open
-                ; mov x8, 0x2
+                ; mov x8, #56 // openat syscall number
+                ; add x0, x0, #101 // AT_FDCWD
                 ; adr x0, -> new_paths
-                ; add x0, x0, x15, lsl 3 // path
-                ; mov x2, 0x0
-                ; svc 0
+                ; add x16, x14, x15
+                ; ldr x2, [x16, #8] 
+                ; add x1, x1, x2 // path
+                ; mov x2, #0
+                ; svc #0
                 ; mov x12, x0 // store newly opened fd in x12
                 // lseek
-                ; mov x8, 0x8
+                ; mov x8, #62
                 ; ldr x0, [x14, x15] // fd
-                ; mov x1, 0
-                ; mov x2, 1
-                ; svc 0
-                ; mov x0, x12
+                ; mov x1, #0
+                ; mov x2, #1 // SEEK_CUR
+                ; svc #0
                 ; mov x1, x0
+                ; mov x0, x12
                 // lseek
-                ; mov x8, 0x8
-                ; mov x2, 0
-                ; svc 0
+                ; mov x8, #62 // lseek syscall number
+                ; mov x2, #0 // SEEK_SET
+                ; svc #0
                 // dup2
-                ; mov x8, 0x21
+                ; mov x8, #23 // dup2 syscall number
                 ; mov x0, x12
                 ; ldr x1, [x14, x15] // fd
-                ; svc 0
+                ; svc #0
                 // close
-                ; mov x8, 0x3
+                ; mov x8, #57 // close syscall number
                 ; mov x0, x12
-                ; svc 0
+                ; svc #0
 
-                ; add x15, x15, #16
+                ; add x15, x15, #24 // size of ReplaceCase (assuming 24 bytes)
                 ; ->end:
                 ; ldr x13, ->cases_length
                 ; cmp x15, x13
-                ; b.lt ->start
+                ; b.lo ->start
 
-                ; brk 0
+                ; brk #0
             );
 
             let instructions = vec_rt.finalize()?;

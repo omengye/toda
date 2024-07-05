@@ -226,7 +226,7 @@ impl TracedProcess {
             let mut regs = ptrace::getregs(pid)?;
             let cur_ins_ptr = regs.pc; // 使用 pc 寄存器代替 rip
 
-            regs.regs[0] = id; // 使用 x0 寄存器传递系统调用号
+            regs.regs[8] = id; // 使用 x0 寄存器传递系统调用号
             for (index, arg) in args.iter().enumerate() {
                 // arm64 平台下，使用 x0-x7 寄存器传递参数
                 if index < 8 {
@@ -242,7 +242,7 @@ impl TracedProcess {
                 pid,
                 cur_ins_ptr as *mut libc::c_void,
                 // 0xd4200001 为 svc #0 指令的机器码
-                (0xd4200001u32 as c_char).into(),
+                0xd4000001 as libc::c_long, // AArch64 syscall instruction
             )?;
             ptrace::step(pid, None)?;
 

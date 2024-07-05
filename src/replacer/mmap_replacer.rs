@@ -152,10 +152,9 @@ impl ProcessAccessor {
         let mut new_paths = Vec::new();
         self.new_paths.read_to_end(&mut new_paths)?;
 
-        let cases = &mut *self.cases.clone();
-        let cases_ptr = &mut cases[0] as *mut RawReplaceCase as *mut u8;
-        let size = std::mem::size_of_val(cases);
-        let cases = unsafe { std::slice::from_raw_parts(cases_ptr, size) };
+        let (cases_ptr, length, _) = self.cases.clone().into_raw_parts();
+        let size = length * std::mem::size_of::<RawReplaceCase>();
+        let cases = unsafe { std::slice::from_raw_parts(cases_ptr as *mut u8, size) };
 
         self.process.run_codes(|addr| {
             let mut vec_rt =
@@ -183,50 +182,50 @@ impl ProcessAccessor {
                 ; b ->end
                 ; ->start:
                 // munmap
-                ; mov x8, 0x0B
-                ; ldr x0, [x14, x15] // fd
-                //; ldr x1, [x14, x15, 8] // length
-                ; add x15, x15, 8
-                ; ldr x1, [x14, x15] // length
-                ; mov x2, 0x0
-                ; svc 0
+                ; mov x8, #215 // munmap syscall number
+                ; ldr x0, [x14, x15] // addr
+                ; add x16, x14, x15
+                ; ldr x2, [x16, #8]
+                ; mov x2, #0
+                ; svc #0
                 // open
-                ; mov x8, 0x2
-
-                ; adr x0, -> new_paths
-                ; add x15, x15, 8 * 4 // set x15 to point to path
-                ; ldr x1, [x14,x15] // path
-                ; add x0, x0, x1
-                ; sub x15, x15, 8 * 4
-
-                ; mov x1, 2
-                ; mov x2, 0x0
+                ; mov x8, #56 // openat syscall number
+                ; add x0, x0, #101 // AT_FDCWD
+                ; adr x1, -> new_paths
+                ; add x15, x15, #32 // set x15 to point to path
+                ; ldr x2, [x14,x15]
+                ; add x1, x1, x2 // path
+                ; sub x15, x15, #32
+                ; mov x2, #2 // O_RDWR
+                ; mov x3, #0
                 ; svc 0
-                ; mov x19, x0 // fd
+                ; mov x8, x0 // Save fd to x8
                 // mmap
-                ; mov x8, 0x9
-                ; add x15, x15, 8
-                ; ldr x1, [x14,x15] // length
-                ; add x15, x15, 8
-                ; ldr x2, [x14,x15] // prot
-                ; add x15, x15, 8
-                ; ldr x3, [x14,x15] // flags
-                ; add x15, x15, 16
-                ; ldr x4, [x14,x15] // offset
-                ; svc 0
-                ; sub x15, x15, 8 * 5
+                ; mov x8, #222 // mmap syscall number
+                ; mov x0, #0
+                ; add x15, x15, #8
+                ; ldr x2, [x14, x15] // length
+                ; add x15, x15, #8
+                ; ldr x2, [x14, x15] // prot
+                ; add x15, x15, #8
+                ; ldr x3, [x14, x15] // flags
+                ; add x15, x15, #16
+                ; ldr x5, [x14, x15] // offset
+                ; mov x4, x8 // fd
+                ; svc #0
+                ; sub x15, x15, #40
                 // close
-                ; mov x8, 0x3
-                ; mov x0, x8
-                ; svc 0
+                ; mov x8, #57 // close syscall number
+                ; mov x0, x8 // fd
+                ; svc #0
 
-                ; add x15, x15, 48
+                ; add x15, x15, #48 // size of RawReplaceCase
                 ; ->end:
                 ; ldr x13, ->cases_length
-                ; cmp x15, x20
-                ; b.lt ->start
+                ; cmp x15, x13
+                ; b.lo ->start
 
-                ; brk 0
+                ; brk #0
             );
 
             let instructions = vec_rt.finalize()?;
