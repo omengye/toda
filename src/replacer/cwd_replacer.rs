@@ -47,6 +47,7 @@ impl CwdReplacer {
             })
             .collect();
 
+        info!("preparing cmdreplacer end");
         Ok(CwdReplacer { processes })
     }
 }

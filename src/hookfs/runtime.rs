@@ -6,12 +6,13 @@ use tokio::runtime::Runtime;
 use tokio::task::JoinHandle;
 use tracing::trace;
 
+use tokio::runtime::Builder;
+
 pub static RUNTIME: Lazy<RwLock<Option<Runtime>>> = Lazy::new(|| {
     trace!("build tokio runtime");
 
     RwLock::new(Some(
-        tokio::runtime::Builder::new()
-            .threaded_scheduler()
+        Builder::new_multi_thread()
             .thread_name("toda")
             .enable_all()
             .build()

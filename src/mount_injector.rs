@@ -106,11 +106,13 @@ impl MountInjector {
         let mounts = mount::MountsInfo::parse_mounts()?;
 
         if mounts.non_root(&original_path)? {
+            info!("=========> move_mount start");
             // TODO: make the parent mount points private before move mount points
             mounts.move_mount(original_path, new_path)?;
-        } else {
+        } else { 
             return Err(anyhow!("inject on a root mount"));
         }
+        info!("=========> move_mount end");
 
         let injectors = MultiInjector::build(self.injector_config.clone())?;
 

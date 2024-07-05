@@ -2,7 +2,7 @@ use std::path::Path;
 
 use async_trait::async_trait;
 use fuser::FileAttr;
-use tracing::trace;
+use tracing::{info, trace};
 
 use super::attr_override_injector::AttrOverrideInjector;
 use super::fault_injector::FaultInjector;
@@ -19,21 +19,25 @@ pub struct MultiInjector {
 
 impl MultiInjector {
     pub fn build(conf: Vec<InjectorConfig>) -> anyhow::Result<Self> {
-        trace!("build multiinjectors");
+        info!("build multiinjectors");
         let mut injectors = Vec::new();
 
         for injector in conf.into_iter() {
             let injector = match injector {
                 InjectorConfig::Fault(faults) => {
+                    info!("fault inject");
                     (Box::new(FaultInjector::build(faults)?)) as Box<dyn Injector>
                 }
                 InjectorConfig::Latency(latency) => {
+                    info!("latency inject");
                     (Box::new(LatencyInjector::build(latency)?)) as Box<dyn Injector>
                 }
                 InjectorConfig::AttrOverride(attr_override) => {
+                    info!("attrOverride inject");
                     (Box::new(AttrOverrideInjector::build(attr_override)?)) as Box<dyn Injector>
                 }
                 InjectorConfig::Mistake(mistakes) => {
+                    info!("mistake inject");
                     (Box::new(MistakeInjector::build(mistakes)?)) as Box<dyn Injector>
                 }
             };
@@ -48,6 +52,7 @@ impl MultiInjector {
 impl Injector for MultiInjector {
     async fn inject(&self, method: &filter::Method, path: &Path) -> Result<()> {
         for injector in self.injectors.iter() {
+            info!("========> start inject: {}", path.to_str().unwrap());
             injector.inject(method, path).await?
         }
 
@@ -62,17 +67,17 @@ impl Injector for MultiInjector {
         Ok(())
     }
 
-    fn inject_attr(&self, attr: &mut FileAttr, path: &Path) {
-        for injector in self.injectors.iter() {
-            injector.inject_attr(attr, path)
-        }
-    }
-
     fn inject_write_data(&self, path: &Path, data: &mut Vec<u8>) -> Result<()> {
         for injector in self.injectors.iter() {
             injector.inject_write_data(path, data)?;
         }
         Ok(())
+    }
+
+    fn inject_attr(&self, attr: &mut FileAttr, path: &Path) {
+        for injector in self.injectors.iter() {
+            injector.inject_attr(attr, path)
+        }
     }
 
     fn interrupt(&self) {

@@ -1,7 +1,8 @@
 use std::fs::create_dir_all;
 use std::path::Path;
 
-use anyhow::{Context, Result};
+use anyhow::Result;
+use log::info;
 use nix::mount::{mount, MsFlags};
 use procfs::process::{self, Process};
 
@@ -36,20 +37,23 @@ impl MountsInfo {
         target_path: P2,
     ) -> Result<()> {
         create_dir_all(target_path.as_ref())?;
-
+        info!("create_dir_all, original_path: {}, target_path: {}", original_path.as_ref().display(), target_path.as_ref().display());
+        mount::<Path, Path, str, str>(
+            Some(original_path.as_ref()),
+            original_path.as_ref(),
+            None,
+            MsFlags::MS_PRIVATE,
+            None,
+        ).expect("mount private failed");
+            
         mount::<_, _, str, str>(
             Some(original_path.as_ref()),
             target_path.as_ref(),
             None,
             MsFlags::MS_MOVE,
             None,
-        )
-        .context(format!(
-            "source: {}, target: {}",
-            original_path.as_ref().display(),
-            target_path.as_ref().display()
-        ))?;
-
+        ).expect("mount move failed");
+        info!("========> create_dir_all end");
         Ok(())
     }
 }

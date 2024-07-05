@@ -9,7 +9,7 @@ use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
 use itertools::Itertools;
 use nix::sys::mman::{MapFlags, ProtFlags};
 use procfs::process::{MMapPath,MMPermissions};
-use tracing::{error, info, trace};
+use tracing::{debug, error, info, trace};
 
 use super::utils::all_processes;
 use super::{ptrace, Replacer};
@@ -88,8 +88,6 @@ impl ProcessAccessorBuilder {
         new_path: PathBuf,
         offset: u64,
     ) -> anyhow::Result<()> {
-        info!("push case");
-
         let mut new_path = new_path
             .to_str()
             .ok_or(anyhow!("fd contains non-UTF-8 character"))?
@@ -161,9 +159,9 @@ impl ProcessAccessor {
 
         self.process.run_codes(|addr| {
             let mut vec_rt =
-                dynasmrt::VecAssembler::<dynasmrt::x64::X64Relocation>::new(addr as usize);
+                dynasmrt::VecAssembler::<dynasmrt::aarch64::Aarch64Relocation>::new(addr as usize);
             dynasm!(vec_rt
-                ; .arch x64
+                ; .arch aarch64
                 ; ->cases:
                 ; .bytes cases
                 ; ->cases_length:
@@ -177,56 +175,58 @@ impl ProcessAccessor {
             trace!("static bytes placed");
             let replace = vec_rt.offset();
             dynasm!(vec_rt
-                ; .arch x64
-                // set r15 to 0
-                ; xor r15, r15
-                ; lea r14, [-> cases]
+                ; .arch aarch64
+                // set x15 to 0
+                ; mov x15, #0
+                ; adr x14, -> cases
 
-                ; jmp ->end
+                ; b ->end
                 ; ->start:
                 // munmap
-                ; mov rax, 0x0B
-                ; mov rdi, QWORD [r14+r15] // addr
-                ; mov rsi, QWORD [r14+r15+8] // length
-                ; mov rdx, 0x0
-                ; syscall
+                ; mov x8, 0x0B
+                ; ldr x0, [x14, x15] // fd
+                //; ldr x1, [x14, x15, 8] // length
+                ; add x15, x15, 8
+                ; ldr x1, [x14, x15] // length
+                ; mov x2, 0x0
+                ; svc 0
                 // open
-                ; mov rax, 0x2
+                ; mov x8, 0x2
 
-                ; lea rdi, [-> new_paths]
-                ; add r15, 8 * 4 // set r15 to point to path
-                ; add rdi, QWORD [r14+r15] // path
-                ; sub r15, 8 * 4
+                ; adr x0, -> new_paths
+                ; add x15, x15, 8 * 4 // set x15 to point to path
+                ; ldr x1, [x14,x15] // path
+                ; add x0, x0, x1
+                ; sub x15, x15, 8 * 4
 
-                ; mov rsi, libc::O_RDWR
-                ; mov rdx, 0x0
-                ; syscall
-                ; push rax
-                ; mov r8, rax // fd
+                ; mov x1, 2
+                ; mov x2, 0x0
+                ; svc 0
+                ; mov x19, x0 // fd
                 // mmap
-                ; mov rax, 0x9
-                ; add r15, 8
-                ; mov rsi, QWORD [r14+r15] // length
-                ; add r15, 8
-                ; mov rdx, QWORD [r14+r15] // prot
-                ; add r15, 8
-                ; mov r10, QWORD [r14+r15] // flags
-                ; add r15, 16
-                ; mov r9, QWORD [r14+r15] // offset
-                ; syscall
-                ; sub r15, 8 * 5
+                ; mov x8, 0x9
+                ; add x15, x15, 8
+                ; ldr x1, [x14,x15] // length
+                ; add x15, x15, 8
+                ; ldr x2, [x14,x15] // prot
+                ; add x15, x15, 8
+                ; ldr x3, [x14,x15] // flags
+                ; add x15, x15, 16
+                ; ldr x4, [x14,x15] // offset
+                ; svc 0
+                ; sub x15, x15, 8 * 5
                 // close
-                ; mov rax, 0x3
-                ; pop rdi
-                ; syscall
+                ; mov x8, 0x3
+                ; mov x0, x8
+                ; svc 0
 
-                ; add r15, std::mem::size_of::<RawReplaceCase>() as i32
+                ; add x15, x15, 48
                 ; ->end:
-                ; mov r13, QWORD [->cases_length]
-                ; cmp r15, r13
-                ; jb ->start
+                ; ldr x13, ->cases_length
+                ; cmp x15, x20
+                ; b.lt ->start
 
-                ; int3
+                ; brk 0
             );
 
             let instructions = vec_rt.finalize()?;
@@ -336,6 +336,7 @@ impl MmapReplacer {
             })
             .collect();
 
+        info!("preparing mmap replacer end");
         Ok(MmapReplacer { processes })
     }
 }

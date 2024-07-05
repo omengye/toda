@@ -55,14 +55,14 @@ fn attach_task(task: &Task) -> Result<()> {
             }
         _ => {}
     }
-    info!("attach task: {} successfully", task.tid);
+    trace!("attach task: {} successfully", task.tid);
 
     // TODO: check wait result
     match wait::waitpid(pid, Some(wait::WaitPidFlag::__WALL)) {
         Ok(status) => {
             trace!("wait status: {:?}", status);
         }
-        Err(err) => warn!("fail to wait for process({}): {:?}", pid, err),
+        Err(err) => trace!("fail to wait for process({}): {:?}", pid, err)
     };
 
     Ok(())
@@ -103,7 +103,7 @@ impl PtraceManager {
                     }
                 }
 
-                info!("trace process: {} successfully", pid);
+                trace!("trace process: {} successfully", pid);
                 counter_ref.insert(raw_pid, 1);
             }
         }
@@ -121,7 +121,7 @@ impl PtraceManager {
                 if *count < 1 {
                     counter_ref.remove(&pid);
 
-                    info!("detach process: {}", pid);
+                    debug!("detach process: {}", pid);
                     if let Err(err) = retry::retry::<_, _, _, anyhow::Error, _>(
                         Fixed::from_millis(500).take(20),
                         || match procfs::process::Process::new(pid) {
@@ -139,7 +139,7 @@ impl PtraceManager {
                                     for task in tasks.flatten() {
                                         match ptrace::detach(Pid::from_raw(task.tid), None) {
                                             Ok(()) => {
-                                                info!("successfully detached task: {}", task.tid);
+                                                debug!("successfully detached task: {}", task.tid);
                                             }
                                             Err(Errno::ESRCH) => trace!(
                                                     "task {} doesn't exist, maybe has stopped or not traced",
@@ -151,7 +151,7 @@ impl PtraceManager {
                                         }
                                         trace!("detach task: {} successfully", task.tid);
                                     }
-                                    info!("detach process: {} successfully", pid);
+                                    debug!("detach process: {} successfully", pid);
                                     OperationResult::Ok(())
                                 }
                             },
@@ -238,14 +238,12 @@ impl TracedProcess {
             trace!("setting regs for pid: {:?}, regs: {:?}", pid, regs);
             ptrace::setregs(pid, regs)?;
 
-            unsafe {
-                ptrace::write(
-                    pid,
-                    cur_ins_ptr as *mut libc::c_void,
-                    // 0xd4200001 为 svc #0 指令的机器码
-                    (0xd4200001u32 as c_char).into(),
-                )?
-            };
+            ptrace::write(
+                pid,
+                cur_ins_ptr as *mut libc::c_void,
+                // 0xd4200001 为 svc #0 指令的机器码
+                (0xd4200001u32 as c_char).into(),
+            )?;
             ptrace::step(pid, None)?;
 
             loop {
@@ -391,14 +389,12 @@ struct ThreadGuard {
 impl Drop for ThreadGuard {
     fn drop(&mut self) {
         let pid = Pid::from_raw(self.tid);
-        unsafe {
-            ptrace::write(
-                pid,
-                self.regs.pc as *mut libc::c_void,
-                self.rip_ins,
-            )
-                .unwrap();
-        }
+        ptrace::write(
+            pid,
+            self.regs.pc as *mut libc::c_void,
+            self.rip_ins,
+        )
+        .unwrap();
         ptrace::setregs(pid, self.regs).unwrap();
     }
 }

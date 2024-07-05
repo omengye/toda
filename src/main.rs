@@ -36,7 +36,7 @@ mod utils;
 use std::convert::TryFrom;
 use std::os::unix::io::RawFd;
 use std::path::PathBuf;
-use std::sync::{mpsc, Mutex};
+use std::sync::{Arc, mpsc, Mutex};
 use std::{io, thread};
 use std::os::fd::{AsRawFd, BorrowedFd};
 
@@ -51,6 +51,7 @@ use structopt::StructOpt;
 use tokio::runtime::Runtime;
 use tracing::{info, instrument};
 use tracing_subscriber::EnvFilter;
+use toda::hookfs::HookFs;
 use utils::encode_path;
 
 #[derive(StructOpt, Debug, Clone)]
@@ -87,7 +88,6 @@ fn inject(option: Options, injector_config: Vec<InjectorConfig>) -> Result<Mount
     if let Err(err) = fuse_device::mkfuse_node() {
         info!("fail to make /dev/fuse node: {}", err)
     }
-
     let mut injection = MountInjector::create_injection(&option.path, injector_config)?;
     let mount_guard = injection.mount()?;
     info!("mount successfully");
@@ -120,12 +120,12 @@ fn resume(option: Options, mount_guard: MountInjectionGuard) -> Result<()> {
     let replacer = if !option.mount_only {
         let mut replacer = UnionReplacer::default();
         replacer.prepare(&path, &new_path)?;
-        info!("running replacer");
         let result = replacer.run();
         info!("replace result: {:?}", result);
 
         Some(replacer)
     } else {
+        info!("replacer none");
         None
     };
 
@@ -144,9 +144,7 @@ static mut SIGNAL_PIPE_WRITER: RawFd = 0;
 const SIGNAL_MSG: [u8; 6] = *b"SIGNAL";
 
 extern "C" fn signal_handler(_: libc::c_int) {
-    unsafe {
-        write(unsafe { BorrowedFd::borrow_raw(SIGNAL_PIPE_WRITER) }, &SIGNAL_MSG).unwrap();
-    }
+    write(unsafe { BorrowedFd::borrow_raw(SIGNAL_PIPE_WRITER) }, &SIGNAL_MSG).unwrap();
 }
 
 fn wait_for_signal(chan: RawFd) -> Result<()> {
@@ -184,9 +182,27 @@ fn main() -> Result<()> {
     let (tx, _) = mpsc::channel();
     {
         let hookfs = match &mount_injector {
-            Ok(e) => Some(e.hookfs.clone()),
-            Err(_) => None,
+            Ok(t) => {
+                info!("init hook fs");
+                Some(t.hookfs.clone())
+            },
+            Err(e) => {
+                info!("mount_injector match error: {}", e.to_string());
+                None
+            },
         };
+        // let hookfs = mount_injector
+        //     .as_ref()
+        //     .map(|t| {
+        //         info!("init hook fs");
+        //         Some(t.hookfs.clone())
+        //     })
+        //     .map_err(|e| {
+        //         info!("mount_injector match error: {}", e.to_string());
+        //         None::<Arc<HookFs>>
+        //     })
+        //     .unwrap_or(None);
+        
         thread::spawn(|| {
             Runtime::new()
                 .expect("Failed to create Tokio runtime")

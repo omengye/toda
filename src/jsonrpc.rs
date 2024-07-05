@@ -3,7 +3,7 @@ use std::sync::{mpsc, Arc, Mutex};
 use jsonrpc_derive::rpc;
 use jsonrpc_stdio_server::jsonrpc_core::*;
 use jsonrpc_stdio_server::ServerBuilder;
-use tracing::{error, info, trace};
+use tracing::{info, trace, warn};
 
 use crate::hookfs::HookFs;
 use crate::injector::{InjectorConfig, MultiInjector};
@@ -71,9 +71,7 @@ impl Rpc for RpcImpl {
             Err(e) => {
                 let tx = &self.tx.lock().unwrap();
                 tx.send(Comm::Shutdown)
-                    .unwrap_or_else(|_err|{
-                        error!("Send through channel failed")
-                    });
+                    .expect("Send through channel failed");
                 Ok(e.to_string())
             }
         }
@@ -81,12 +79,15 @@ impl Rpc for RpcImpl {
     fn update(&self, config: Vec<InjectorConfig>) -> Result<String> {
         info!("rpc update called");
         if let Err(e) = &*self.status.lock().unwrap() {
+            warn!("rpc update lock error: {}", e.to_string());
             return Ok(e.to_string());
         }
+        info!("rpc MultiInjector called");
         let injectors = MultiInjector::build(config);
         if let Err(e) = &injectors {
             return Ok(e.to_string());
         }
+        info!("rpc hookfs called");
         futures::executor::block_on(async {
             let hookfs = self.hookfs.as_ref().unwrap();
             let mut current_injectors = hookfs.injector.write().await;

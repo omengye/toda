@@ -8,7 +8,7 @@ use anyhow::{anyhow, Result};
 use dynasmrt::{dynasm, DynasmApi, DynasmLabelApi};
 use itertools::Itertools;
 use procfs::process::FDTarget;
-use tracing::{error, info, trace};
+use tracing::{debug, error, info, trace};
 
 use super::utils::all_processes;
 use super::{ptrace, Replacer};
@@ -53,7 +53,7 @@ impl ProcessAccessorBuilder {
     }
 
     pub fn push_case(&mut self, fd: u64, new_path: PathBuf) -> anyhow::Result<()> {
-        info!("push case fd: {}, new_path: {}", fd, new_path.display());
+        trace!("push case fd: {}, new_path: {}", fd, new_path.display());
 
         let mut new_path = new_path
             .to_str()
@@ -110,11 +110,12 @@ impl ProcessAccessor {
         let size = std::mem::size_of_val(cases);
         let cases = unsafe { std::slice::from_raw_parts(cases_ptr, size) };
 
+        info!("Aarch64Relocation start");
         self.process.run_codes(|addr| {
             let mut vec_rt =
-                dynasmrt::VecAssembler::<dynasmrt::x64::X64Relocation>::new(addr as usize);
+                dynasmrt::VecAssembler::<dynasmrt::aarch64::Aarch64Relocation>::new(addr as usize);
             dynasm!(vec_rt
-                ; .arch x64
+                ; .arch aarch64
                 ; ->cases:
                 ; .bytes cases
                 ; ->cases_length:
@@ -128,56 +129,56 @@ impl ProcessAccessor {
             trace!("static bytes placed");
             let replace = vec_rt.offset();
             dynasm!(vec_rt
-                ; .arch x64
-                // set r15 to 0
-                ; xor r15, r15
-                ; lea r14, [-> cases]
+                ; .arch aarch64
+                // set x15 to 0
+                ; mov x15, 0
+                ; adr x14, -> cases
 
-                ; jmp ->end
+                ; b ->end
                 ; ->start:
                 // fcntl
-                ; mov rax, 0x48
-                ; mov rdi, QWORD [r14+r15] // fd
-                ; mov rsi, 0x3
-                ; mov rdx, 0x0
-                ; syscall
-                ; mov rsi, rax
+                ; mov x8, 0x48
+                ; ldr x0, [x14, x15] // fd
+                ; mov x1, 0x3
+                ; mov x2, 0x0
+                ; svc 0
+                ; mov x1, x0
                 // open
-                ; mov rax, 0x2
-                ; lea rdi, [-> new_paths]
-                ; add rdi, QWORD [r14+r15+8] // path
-                ; mov rdx, 0x0
-                ; syscall
-                ; mov r12, rax // store newly opened fd in r12
+                ; mov x8, 0x2
+                ; adr x0, -> new_paths
+                ; add x0, x0, x15, lsl 3 // path
+                ; mov x2, 0x0
+                ; svc 0
+                ; mov x12, x0 // store newly opened fd in x12
                 // lseek
-                ; mov rax, 0x8
-                ; mov rdi, QWORD [r14+r15] // fd
-                ; mov rsi, 0
-                ; mov rdx, libc::SEEK_CUR
-                ; syscall
-                ; mov rdi, r12
-                ; mov rsi, rax
+                ; mov x8, 0x8
+                ; ldr x0, [x14, x15] // fd
+                ; mov x1, 0
+                ; mov x2, 1
+                ; svc 0
+                ; mov x0, x12
+                ; mov x1, x0
                 // lseek
-                ; mov rax, 0x8
-                ; mov rdx, libc::SEEK_SET
-                ; syscall
+                ; mov x8, 0x8
+                ; mov x2, 0
+                ; svc 0
                 // dup2
-                ; mov rax, 0x21
-                ; mov rdi, r12
-                ; mov rsi, QWORD [r14+r15] // fd
-                ; syscall
+                ; mov x8, 0x21
+                ; mov x0, x12
+                ; ldr x1, [x14, x15] // fd
+                ; svc 0
                 // close
-                ; mov rax, 0x3
-                ; mov rdi, r12
-                ; syscall
+                ; mov x8, 0x3
+                ; mov x0, x12
+                ; svc 0
 
-                ; add r15, std::mem::size_of::<ReplaceCase>() as i32
+                ; add x15, x15, #16
                 ; ->end:
-                ; mov r13, QWORD [->cases_length]
-                ; cmp r15, r13
-                ; jb ->start
+                ; ldr x13, ->cases_length
+                ; cmp x15, x13
+                ; b.lt ->start
 
-                ; int3
+                ; brk 0
             );
 
             let instructions = vec_rt.finalize()?;
@@ -185,7 +186,7 @@ impl ProcessAccessor {
             Ok((replace.0 as u64, instructions))
         })?;
 
-        trace!("reopen successfully");
+        info!("reopen successfully");
         Ok(())
     }
 }
@@ -247,7 +248,7 @@ impl FdReplacer {
                 }
             })
             .collect();
-
+        info!("preparing fd replacer end");
         Ok(FdReplacer { processes })
     }
 }
@@ -258,7 +259,7 @@ impl Replacer for FdReplacer {
         for (_, accessor) in self.processes.iter_mut() {
             accessor.run()?;
         }
-
+        info!("running fd replacer end");
         Ok(())
     }
 }

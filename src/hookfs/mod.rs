@@ -21,7 +21,7 @@ use nix::dir;
 use nix::errno::Errno;
 use nix::fcntl::{open, readlink, renameat, OFlag};
 use nix::sys::{stat, statfs};
-use nix::unistd::{close, fchownat, fsync, linkat, mkdir, symlinkat, truncate, unlink, AccessFlags, Gid, LinkatFlags, Uid, FchownatFlags};
+use nix::unistd::{close, fchownat, fsync, linkat, mkdir, symlinkat, truncate, unlink, AccessFlags, Gid, LinkatFlags, Uid};
 pub use reply::Reply;
 use reply::*;
 use runtime::spawn_blocking;
@@ -321,7 +321,7 @@ impl HookFs {
 
         // TODO: create a standalone runtime only for interrupt is too ugly.
         //       this RWLock is actually redundant, and the injector is rarely written.
-        let mut rt  = tokio::runtime::Runtime::new().unwrap();
+        let rt  = tokio::runtime::Runtime::new().unwrap();
         rt.block_on(async {
             let injector = self.injector.read().await;
             injector.interrupt();
@@ -699,7 +699,7 @@ impl AsyncFileSystemImpl for HookFs {
                 &original_path,
                 None,
                 &new_path_clone,
-                LinkatFlags::NoSymlinkFollow,
+                LinkatFlags::empty(),
             )
         })
             .await??;
@@ -1230,7 +1230,7 @@ async fn async_lchown(path: &Path, uid: Option<u32>, gid: Option<u32>) -> Result
             &path_clone,
             uid.map(Uid::from_raw),
             gid.map(Gid::from_raw),
-            FchownatFlags::NoFollowSymlink,
+            LinkatFlags::empty(),
         )
     })
         .await??;
