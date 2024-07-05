@@ -105,17 +105,15 @@ impl ProcessAccessor {
         let mut new_paths = Vec::new();
         self.new_paths.read_to_end(&mut new_paths)?;
 
-        let cases = &mut *self.cases.clone();
-        let cases_ptr = &mut cases[0] as *mut ReplaceCase as *mut u8;
-        let size = std::mem::size_of_val(cases);
-        let cases = unsafe { std::slice::from_raw_parts(cases_ptr, size) };
+        let (cases_ptr, length, _) = self.cases.clone().into_raw_parts();
+        let size = length * std::mem::size_of::<ReplaceCase>();
+        let cases = unsafe { std::slice::from_raw_parts(cases_ptr as *mut u8, size) };
 
-        info!("Aarch64Relocation start");
         self.process.run_codes(|addr| {
             let mut vec_rt =
-                dynasmrt::VecAssembler::<dynasmrt::aarch64::Aarch64Relocation>::new(addr as usize);
+                dynasmrt::VecAssembler::<dynasmrt::x64::X64Relocation>::new(addr as usize);
             dynasm!(vec_rt
-                ; .arch aarch64
+                ; .arch x64
                 ; ->cases:
                 ; .bytes cases
                 ; ->cases_length:
@@ -129,56 +127,56 @@ impl ProcessAccessor {
             trace!("static bytes placed");
             let replace = vec_rt.offset();
             dynasm!(vec_rt
-                ; .arch aarch64
-                // set x15 to 0
-                ; mov x15, 0
-                ; adr x14, -> cases
+                ; .arch x64
+                // set r15 to 0
+                ; xor r15, r15
+                ; lea r14, [-> cases]
 
-                ; b ->end
+                ; jmp ->end
                 ; ->start:
                 // fcntl
-                ; mov x8, 0x48
-                ; ldr x0, [x14, x15] // fd
-                ; mov x1, 0x3
-                ; mov x2, 0x0
-                ; svc 0
-                ; mov x1, x0
+                ; mov rax, 0x48
+                ; mov rdi, QWORD [r14+r15] // fd
+                ; mov rsi, 0x3
+                ; mov rdx, 0x0
+                ; syscall
+                ; mov rsi, rax
                 // open
-                ; mov x8, 0x2
-                ; adr x0, -> new_paths
-                ; add x0, x0, x15, lsl 3 // path
-                ; mov x2, 0x0
-                ; svc 0
-                ; mov x12, x0 // store newly opened fd in x12
+                ; mov rax, 0x2
+                ; lea rdi, [-> new_paths]
+                ; add rdi, QWORD [r14+r15+8] // path
+                ; mov rdx, 0x0
+                ; syscall
+                ; mov r12, rax // store newly opened fd in r12
                 // lseek
-                ; mov x8, 0x8
-                ; ldr x0, [x14, x15] // fd
-                ; mov x1, 0
-                ; mov x2, 1
-                ; svc 0
-                ; mov x0, x12
-                ; mov x1, x0
+                ; mov rax, 0x8
+                ; mov rdi, QWORD [r14+r15] // fd
+                ; mov rsi, 0
+                ; mov rdx, libc::SEEK_CUR
+                ; syscall
+                ; mov rdi, r12
+                ; mov rsi, rax
                 // lseek
-                ; mov x8, 0x8
-                ; mov x2, 0
-                ; svc 0
+                ; mov rax, 0x8
+                ; mov rdx, libc::SEEK_SET
+                ; syscall
                 // dup2
-                ; mov x8, 0x21
-                ; mov x0, x12
-                ; ldr x1, [x14, x15] // fd
-                ; svc 0
+                ; mov rax, 0x21
+                ; mov rdi, r12
+                ; mov rsi, QWORD [r14+r15] // fd
+                ; syscall
                 // close
-                ; mov x8, 0x3
-                ; mov x0, x12
-                ; svc 0
+                ; mov rax, 0x3
+                ; mov rdi, r12
+                ; syscall
 
-                ; add x15, x15, #16
+                ; add r15, std::mem::size_of::<ReplaceCase>() as i32
                 ; ->end:
-                ; ldr x13, ->cases_length
-                ; cmp x15, x13
-                ; b.lt ->start
+                ; mov r13, QWORD [->cases_length]
+                ; cmp r15, r13
+                ; jb ->start
 
-                ; brk 0
+                ; int3
             );
 
             let instructions = vec_rt.finalize()?;
@@ -186,7 +184,7 @@ impl ProcessAccessor {
             Ok((replace.0 as u64, instructions))
         })?;
 
-        info!("reopen successfully");
+        trace!("reopen successfully");
         Ok(())
     }
 }

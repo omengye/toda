@@ -152,16 +152,15 @@ impl ProcessAccessor {
         let mut new_paths = Vec::new();
         self.new_paths.read_to_end(&mut new_paths)?;
 
-        let cases = &mut *self.cases.clone();
-        let cases_ptr = &mut cases[0] as *mut RawReplaceCase as *mut u8;
-        let size = std::mem::size_of_val(cases);
-        let cases = unsafe { std::slice::from_raw_parts(cases_ptr, size) };
+        let (cases_ptr, length, _) = self.cases.clone().into_raw_parts();
+        let size = length * std::mem::size_of::<RawReplaceCase>();
+        let cases = unsafe { std::slice::from_raw_parts(cases_ptr as *mut u8, size) };
 
         self.process.run_codes(|addr| {
             let mut vec_rt =
-                dynasmrt::VecAssembler::<dynasmrt::aarch64::Aarch64Relocation>::new(addr as usize);
+                dynasmrt::VecAssembler::<dynasmrt::x64::X64Relocation>::new(addr as usize);
             dynasm!(vec_rt
-                ; .arch aarch64
+                ; .arch x64
                 ; ->cases:
                 ; .bytes cases
                 ; ->cases_length:
@@ -175,58 +174,56 @@ impl ProcessAccessor {
             trace!("static bytes placed");
             let replace = vec_rt.offset();
             dynasm!(vec_rt
-                ; .arch aarch64
-                // set x15 to 0
-                ; mov x15, #0
-                ; adr x14, -> cases
+                ; .arch x64
+                // set r15 to 0
+                ; xor r15, r15
+                ; lea r14, [-> cases]
 
-                ; b ->end
+                ; jmp ->end
                 ; ->start:
                 // munmap
-                ; mov x8, 0x0B
-                ; ldr x0, [x14, x15] // fd
-                //; ldr x1, [x14, x15, 8] // length
-                ; add x15, x15, 8
-                ; ldr x1, [x14, x15] // length
-                ; mov x2, 0x0
-                ; svc 0
+                ; mov rax, 0x0B
+                ; mov rdi, QWORD [r14+r15] // addr
+                ; mov rsi, QWORD [r14+r15+8] // length
+                ; mov rdx, 0x0
+                ; syscall
                 // open
-                ; mov x8, 0x2
+                ; mov rax, 0x2
 
-                ; adr x0, -> new_paths
-                ; add x15, x15, 8 * 4 // set x15 to point to path
-                ; ldr x1, [x14,x15] // path
-                ; add x0, x0, x1
-                ; sub x15, x15, 8 * 4
+                ; lea rdi, [-> new_paths]
+                ; add r15, 8 * 4 // set r15 to point to path
+                ; add rdi, QWORD [r14+r15] // path
+                ; sub r15, 8 * 4
 
-                ; mov x1, 2
-                ; mov x2, 0x0
-                ; svc 0
-                ; mov x19, x0 // fd
+                ; mov rsi, libc::O_RDWR
+                ; mov rdx, 0x0
+                ; syscall
+                ; push rax
+                ; mov r8, rax // fd
                 // mmap
-                ; mov x8, 0x9
-                ; add x15, x15, 8
-                ; ldr x1, [x14,x15] // length
-                ; add x15, x15, 8
-                ; ldr x2, [x14,x15] // prot
-                ; add x15, x15, 8
-                ; ldr x3, [x14,x15] // flags
-                ; add x15, x15, 16
-                ; ldr x4, [x14,x15] // offset
-                ; svc 0
-                ; sub x15, x15, 8 * 5
+                ; mov rax, 0x9
+                ; add r15, 8
+                ; mov rsi, QWORD [r14+r15] // length
+                ; add r15, 8
+                ; mov rdx, QWORD [r14+r15] // prot
+                ; add r15, 8
+                ; mov r10, QWORD [r14+r15] // flags
+                ; add r15, 16
+                ; mov r9, QWORD [r14+r15] // offset
+                ; syscall
+                ; sub r15, 8 * 5
                 // close
-                ; mov x8, 0x3
-                ; mov x0, x8
-                ; svc 0
+                ; mov rax, 0x3
+                ; pop rdi
+                ; syscall
 
-                ; add x15, x15, 48
+                ; add r15, std::mem::size_of::<RawReplaceCase>() as i32
                 ; ->end:
-                ; ldr x13, ->cases_length
-                ; cmp x15, x20
-                ; b.lt ->start
+                ; mov r13, QWORD [->cases_length]
+                ; cmp r15, r13
+                ; jb ->start
 
-                ; brk 0
+                ; int3
             );
 
             let instructions = vec_rt.finalize()?;

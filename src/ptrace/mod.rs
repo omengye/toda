@@ -193,7 +193,7 @@ impl TracedProcess {
     fn protect(&self) -> Result<ThreadGuard> {
         let regs = ptrace::getregs(Pid::from_raw(self.pid))?;
 
-        let rip = regs.pc;
+        let rip = regs.rip;
         trace!("protecting regs: {:?}", regs);
         let rip_ins = ptrace::read(Pid::from_raw(self.pid), rip as *mut libc::c_void)?;
 
@@ -224,13 +224,23 @@ impl TracedProcess {
             let pid = Pid::from_raw(thread.pid);
 
             let mut regs = ptrace::getregs(pid)?;
-            let cur_ins_ptr = regs.pc; // 使用 pc 寄存器代替 rip
+            let cur_ins_ptr = regs.rip;
 
-            regs.regs[0] = id; // 使用 x0 寄存器传递系统调用号
+            regs.rax = id;
             for (index, arg) in args.iter().enumerate() {
-                // arm64 平台下，使用 x0-x7 寄存器传递参数
-                if index < 8 {
-                    regs.regs[index] = *arg;
+                // All these registers are hard coded for x86 platform
+                if index == 0 {
+                    regs.rdi = *arg
+                } else if index == 1 {
+                    regs.rsi = *arg
+                } else if index == 2 {
+                    regs.rdx = *arg
+                } else if index == 3 {
+                    regs.r10 = *arg
+                } else if index == 4 {
+                    regs.r8 = *arg
+                } else if index == 5 {
+                    regs.r9 = *arg
                 } else {
                     return Err(anyhow!("too many arguments for a syscall"));
                 }
@@ -238,17 +248,19 @@ impl TracedProcess {
             trace!("setting regs for pid: {:?}, regs: {:?}", pid, regs);
             ptrace::setregs(pid, regs)?;
 
-            ptrace::write(
-                pid,
-                cur_ins_ptr as *mut libc::c_void,
-                // 0xd4200001 为 svc #0 指令的机器码
-                (0xd4200001u32 as c_char).into(),
-            )?;
+            // We only support x86-64 platform now, so using hard coded `LittleEndian` here is ok.
+            unsafe {
+                ptrace::write(
+                    pid,
+                    cur_ins_ptr as *mut libc::c_void,
+                    0x050f as libc::c_long,
+                )?
+            };
             ptrace::step(pid, None)?;
 
             loop {
                 let status = wait::waitpid(pid, None)?;
-                trace!("wait status: {:?}", status);
+                info!("wait status: {:?}", status);
                 match status {
                     wait::WaitStatus::Stopped(_, Signal::SIGTRAP) => break,
                     _ => ptrace::step(pid, None)?,
@@ -257,9 +269,9 @@ impl TracedProcess {
 
             let regs = ptrace::getregs(pid)?;
 
-            trace!("returned: {:?}", regs.regs[0]);
+            trace!("returned: {:?}", regs.rax);
 
-            Ok(regs.regs[0])
+            Ok(regs.rax)
         })
     }
 
@@ -324,7 +336,7 @@ impl TracedProcess {
         let pid = Pid::from_raw(self.pid);
 
         let regs = ptrace::getregs(pid)?;
-        let (_, ins) = codes(regs.pc)?; // generate codes to get length
+        let (_, ins) = codes(regs.rip)?; // generate codes to get length
 
         self.with_mmap(ins.len() as u64 + 16, |_, addr| {
             self.with_protect(|_| {
@@ -336,7 +348,7 @@ impl TracedProcess {
 
                 let mut regs = ptrace::getregs(pid)?;
                 trace!("modify rip to addr: {:X}", addr + offset);
-                regs.pc = addr + offset;
+                regs.rip = addr + offset;
                 ptrace::setregs(pid, regs)?;
 
                 let regs = ptrace::getregs(pid)?;
@@ -348,13 +360,14 @@ impl TracedProcess {
 
                     info!("wait for pid: {:?}", pid);
                     let status = wait::waitpid(pid, None)?;
-                    trace!("wait status: {:?}", status);
+                    info!("wait status: {:?}", status);
 
+                    use nix::sys::signal::SIGTRAP;
                     let regs = ptrace::getregs(pid)?;
 
                     info!("current registers: {:?}", regs);
                     match status {
-                        wait::WaitStatus::Stopped(_, Signal::SIGTRAP) => {
+                        wait::WaitStatus::Stopped(_, SIGTRAP) => {
                             break;
                         }
                         _ => info!("continue running replacers"),
@@ -389,12 +402,14 @@ struct ThreadGuard {
 impl Drop for ThreadGuard {
     fn drop(&mut self) {
         let pid = Pid::from_raw(self.tid);
-        ptrace::write(
-            pid,
-            self.regs.pc as *mut libc::c_void,
-            self.rip_ins,
-        )
-        .unwrap();
+        unsafe {
+            ptrace::write(
+                pid,
+                self.regs.rip as *mut libc::c_void,
+                self.rip_ins as libc::c_long,
+            )
+                .unwrap();
+        }
         ptrace::setregs(pid, self.regs).unwrap();
     }
 }
